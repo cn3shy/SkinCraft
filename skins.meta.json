@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "nextId": 3,
+  "nextId": 8,
   "skins": [
     {
       "id": "00000001",
@@ -15,6 +15,41 @@
       "name": "9fff8f58e77e049b",
       "size": 2066,
       "uploadedAt": "2026-10-04T10:16:05.911Z"
+    },
+    {
+      "id": "00000003",
+      "sha256": "cef14cfa25c2a222c840b00f92012aaa82898481113fe98876622f8444ca7462",
+      "name": "glorb-_-effects",
+      "size": 895,
+      "uploadedAt": "2026-10-04T10:43:03.951Z"
+    },
+    {
+      "id": "00000004",
+      "sha256": "203b81017c302c03ed5c6953b80d3be67e179d7795ab79d63d525391295b991c",
+      "name": "rainbow-kid",
+      "size": 1260,
+      "uploadedAt": "2026-10-04T10:43:03.951Z"
+    },
+    {
+      "id": "00000005",
+      "sha256": "5f2fe69883f08ebd5ba15a9a73bddba712ba5759fd974d3d0764e6ca3a128a11",
+      "name": "hatsune-miku",
+      "size": 1544,
+      "uploadedAt": "2026-10-04T10:43:03.951Z"
+    },
+    {
+      "id": "00000006",
+      "sha256": "8aefb5b5bba2f707f8e324eeae32a36483721bd05bf010e0041aaedaf8ae8901",
+      "name": "-=--winter-frost--=-",
+      "size": 935,
+      "uploadedAt": "2026-10-04T10:43:03.951Z"
+    },
+    {
+      "id": "00000007",
+      "sha256": "a75bcaf0be6643c785cf7ae44833fbf42778d3d015ad40a4dd945264afaef7e5",
+      "name": "preppy-kitty",
+      "size": 2475,
+      "uploadedAt": "2026-10-04T10:43:03.951Z"
     }
   ]
 }
