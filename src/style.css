@@ -1,0 +1,35 @@
+:root {
+  color-scheme: dark;
+  --bg: #14161a;
+  --panel: #1a1e24;
+  --border: #262b33;
+  --text: #e7e9ee;
+  --muted: #97a1b0;
+  --accent: #5b9dd9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent);
+}
+
+.state {
+  padding: 3rem 0;
+  color: var(--muted);
+  text-align: center;
+}
+
+.state.error {
+  color: #e08a8a;
+}

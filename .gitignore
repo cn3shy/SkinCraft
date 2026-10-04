@@ -1,0 +1,17 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# 构建产物：由 scripts/build-index.mjs 生成，不入库
+public/skins.json
+
+# 本地环境变量（内含 ADMIN_PASSWORD / GITHUB_TOKEN，绝不能提交）
+.env
+.env.local
+
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json

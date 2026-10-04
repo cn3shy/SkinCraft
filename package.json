@@ -1,0 +1,26 @@
+{
+  "name": "skincraft",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minecraft 皮肤站：3D 预览 + 永久 PNG 直链",
+  "scripts": {
+    "dev": "node scripts/build-index.mjs && vite",
+    "build": "node scripts/build-index.mjs && vite build",
+    "preview": "vite preview",
+    "dev:upload": "node scripts/dev-upload-server.mjs",
+    "test": "node --test",
+    "typecheck": "vue-tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "skinview3d": "^3.4.2",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.2",
+    "vue-tsc": "^3.3.12"
+  }
+}
