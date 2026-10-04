@@ -6,7 +6,7 @@
   "description": "Minecraft 皮肤站：3D 预览 + 永久 PNG 直链",
   "scripts": {
     "dev": "node scripts/build-index.mjs && vite",
-    "build": "node scripts/build-index.mjs && vite build",
+    "build": "node scripts/ensure-native-binding.mjs && node scripts/build-index.mjs && vite build",
     "preview": "vite preview",
     "dev:upload": "node scripts/dev-upload-server.mjs",
     "test": "node --test",
