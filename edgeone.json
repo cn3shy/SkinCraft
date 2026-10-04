@@ -1,6 +1,6 @@
 {
   "name": "skincraft",
-  "installCommand": "npm ci",
+  "installCommand": "npm install --include=optional --no-audit --no-fund",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "nodeVersion": "22.11.0",
