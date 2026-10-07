@@ -3,13 +3,6 @@
   "nextId": 8,
   "skins": [
     {
-      "id": "00000001",
-      "sha256": "d0033a4545150b2d2722f18043643d4f0d042a611b70ea180bec3100a93c3aa3",
-      "name": "样例皮肤",
-      "size": 210,
-      "uploadedAt": "2026-10-04T09:28:50Z"
-    },
-    {
       "id": "00000002",
       "sha256": "ea22be18d94af7c926ace69b73dd0a811833e33152b8a8cd55f10d48b217d47e",
       "name": "9fff8f58e77e049b",
