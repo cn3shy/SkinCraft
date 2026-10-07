@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import CopyButton from '../components/CopyButton.vue'
+import { formatSize, loadIndex, type SkinEntry } from '../lib/skins'
 
 const PASSWORD_KEY = 'skincraft-admin-password'
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
@@ -10,10 +11,11 @@ type DraftStatus = 'ready' | 'invalid' | 'planned' | 'duplicate' | 'created' | '
 interface Draft {
   key: number
   fileName: string
-  name: string
   size: number
   sha256: string
   contentBase64: string
+  /** 本地即时预览用的 data URL。文件已经在内存里，不需要额外请求。 */
+  preview: string
   status: DraftStatus
   /** 服务端给出的拒绝原因，或本地初筛的原因 */
   reason?: string
@@ -28,6 +30,14 @@ const busy = ref(false)
 const message = ref('')
 const messageKind = ref<'info' | 'error'>('info')
 const dragging = ref(false)
+
+/** 已发布皮肤（站点索引），用于删除。 */
+const published = ref<SkinEntry[] | null>(null)
+const publishedError = ref('')
+/** 正在等待二次确认的 ID，null 表示没有待确认的删除。 */
+const confirmingId = ref<string | null>(null)
+/** 正在请求删除的 ID。 */
+const deletingId = ref<string | null>(null)
 
 let nextKey = 1
 
@@ -65,19 +75,20 @@ async function addFiles(files: FileList | File[]): Promise<void> {
     const bytes = new Uint8Array(await file.arrayBuffer())
     // 本地只做魔数初筛，拿到即时反馈；尺寸等权威校验交给服务端
     const magicOk = PNG_MAGIC.every((byte, index) => bytes[index] === byte)
+    const contentBase64 = toBase64(bytes)
     drafts.value.push({
       key: nextKey++,
       fileName: file.name,
-      name: file.name.replace(/\.png$/i, ''),
       size: bytes.length,
       sha256: await sha256Hex(bytes),
-      contentBase64: toBase64(bytes),
+      contentBase64,
+      preview: `data:image/png;base64,${contentBase64}`,
       status: magicOk ? 'ready' : 'invalid',
       reason: magicOk ? undefined : '不是 PNG 文件（魔数不匹配）',
       selected: magicOk,
     })
   }
-  say(`已加入 ${incoming.length} 个文件，先点「预检」确认后再上传。`)
+  say(`已加入 ${incoming.length} 个文件，点「预检」后会按分配到的 ID 命名。`)
 }
 
 function reset(): void {
@@ -102,8 +113,9 @@ async function callUpload(dryRun: boolean): Promise<void> {
       },
       body: JSON.stringify({
         dryRun,
+        // 不再提交 name：展示名一律是服务端分配的 ID，
+        // meta 里那个 name 字段保留在旧数据上但不再由前端写入。
         items: items.map((draft) => ({
-          name: draft.name,
           contentBase64: draft.contentBase64,
           sha256: draft.sha256,
           size: draft.size,
@@ -145,7 +157,7 @@ async function callUpload(dryRun: boolean): Promise<void> {
 
     say(
       dryRun
-        ? '预检完成。确认无误后点「上传」，会合并成一次提交。'
+        ? '预检完成，名称已按分配到的 ID 填好。确认无误后点「上传」，会合并成一次提交。'
         : `已提交${payload.commitSha ? `（${payload.commitSha.slice(0, 7)}）` : ''}，站点大约 1–3 分钟后生效。`,
     )
   } catch (cause) {
@@ -166,8 +178,56 @@ function onPick(event: Event): void {
   input.value = ''
 }
 
+// ---------------------------------------------------------------- 已发布皮肤
+
+async function loadPublished(): Promise<void> {
+  publishedError.value = ''
+  try {
+    const index = await loadIndex()
+    // 按 ID 升序：ID 就是展示名，单调递增的编号比"最近上传在前"更好定位
+    published.value = [...index.skins].sort((a, b) => a.id.localeCompare(b.id))
+  } catch (cause) {
+    published.value = null
+    publishedError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function deleteSkin(id: string): Promise<void> {
+  if (!password.value) {
+    say('请先在上方填入管理密码。', 'error')
+    return
+  }
+
+  deletingId.value = id
+  try {
+    const response = await fetch(`/api/skin?id=${id}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${password.value}` },
+    })
+    const payload = (await response.json().catch(() => ({}))) as { error?: string; commitSha?: string }
+
+    if (!response.ok) {
+      say(payload.error ?? `删除失败：HTTP ${response.status}`, 'error')
+      return
+    }
+
+    // 立刻从列表里摘掉，避免要等到构建完成才看不到；本地状态与远端提交一致
+    published.value = published.value?.filter((entry) => entry.id !== id) ?? null
+    say(
+      `已永久删除 #${id}${payload.commitSha ? `（${payload.commitSha.slice(0, 7)}）` : ''}。` +
+        `PNG 文件与元数据条目都已从仓库移除，该直链在重新构建后开始 404。`,
+    )
+  } catch (cause) {
+    say(`删除出错：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+  } finally {
+    deletingId.value = null
+    confirmingId.value = null
+  }
+}
+
 onMounted(() => {
   password.value = sessionStorage.getItem(PASSWORD_KEY) ?? ''
+  void loadPublished()
 })
 </script>
 
@@ -211,7 +271,8 @@ onMounted(() => {
       <thead>
         <tr>
           <th />
-          <th>名称</th>
+          <th>预览</th>
+          <th>文件</th>
           <th>体积</th>
           <th>状态</th>
           <th>直链</th>
@@ -227,7 +288,14 @@ onMounted(() => {
             />
           </td>
           <td>
-            <input v-model="draft.name" class="name-input" type="text" maxlength="64" />
+            <span
+              class="thumb"
+              :style="{ backgroundImage: `url(${draft.preview})` }"
+              :title="draft.fileName"
+            />
+          </td>
+          <td>
+            <span class="draft-file" :title="draft.fileName">{{ draft.fileName }}</span>
             <span class="sha">{{ draft.sha256.slice(0, 12) }}…</span>
           </td>
           <td>{{ (draft.size / 1024).toFixed(1) }} KB</td>
@@ -247,6 +315,60 @@ onMounted(() => {
     <p v-if="changed.length > 0" class="hint">
       上传后需要等 EdgeOne 重新构建，直链才会可访问。
     </p>
+
+    <section class="manage">
+      <h2>已发布皮肤</h2>
+      <p class="lead">
+        删除会同时移除 <code>public/s/&lt;id&gt;.png</code> 与 <code>skins.meta.json</code> 里的条目，
+        <strong>不可撤销</strong>：任何已经把该直链存进玩家数据的插件都会开始拿到 404。
+        只想从画廊下架、保留直链的话，请手工从 <code>skins.meta.json</code> 移除条目。
+      </p>
+
+      <p v-if="publishedError" class="message error">{{ publishedError }}</p>
+      <p v-else-if="!published" class="state">正在读取站点索引…</p>
+      <p v-else-if="published.length === 0" class="state">还没有已发布的皮肤。</p>
+
+      <template v-else>
+        <div class="published-head">
+          <span>共 {{ published.length }} 张</span>
+          <button type="button" @click="loadPublished">刷新</button>
+        </div>
+
+        <ul class="published">
+          <li v-for="skin in published" :key="skin.id" class="published-row">
+            <span
+              class="thumb"
+              :style="{ backgroundImage: `url(/s/${skin.id}.png)` }"
+              :title="skin.id"
+            />
+            <a class="mono published-id" :href="`#/s/${skin.id}`">{{ skin.id }}</a>
+            <span class="published-size">{{ formatSize(skin.size) }}</span>
+
+            <span class="published-actions">
+              <template v-if="confirmingId === skin.id">
+                <button
+                  type="button"
+                  class="danger"
+                  :disabled="deletingId === skin.id"
+                  @click="deleteSkin(skin.id)"
+                >
+                  {{ deletingId === skin.id ? '删除中…' : '确认永久删除' }}
+                </button>
+                <button type="button" @click="confirmingId = null">取消</button>
+              </template>
+              <button
+                v-else
+                type="button"
+                :disabled="deletingId !== null"
+                @click="confirmingId = skin.id"
+              >
+                删除
+              </button>
+            </span>
+          </li>
+        </ul>
+      </template>
+    </section>
   </section>
 </template>
 
@@ -385,21 +507,27 @@ h1 {
   color: #c98b8b;
 }
 
-.name-input {
-  width: 100%;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid transparent;
+/* 把 64×64 贴图里的脸部 8×8 区域放大成缩略图，算法与画廊卡片一致：
+   元素是正方形，background-size 放大 800%，再按 (P × (容器 - 图像) = -容器) 得 P = 1/7。 */
+.thumb {
+  display: block;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
+  background-color: #12151a;
+  background-repeat: no-repeat;
+  background-size: 800% 800%;
+  background-position: 14.2857% 14.2857%;
+  image-rendering: pixelated;
 }
 
-.name-input:hover,
-.name-input:focus {
-  border-color: var(--border);
-  background: var(--panel);
-  outline: none;
+/* 文件名只作区分用，真正的展示名是上传后分配的 ID */
+.draft-file {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sha,
@@ -427,5 +555,107 @@ h1 {
   margin-top: 1rem;
   color: var(--muted);
   font-size: 0.8125rem;
+}
+
+/* ---------------------------------------------------------------- 已发布皮肤 */
+
+.manage {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.manage h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.125rem;
+}
+
+.manage .lead {
+  margin: 0 0 1rem;
+}
+
+.manage .lead code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--text);
+}
+
+.manage .lead strong {
+  color: #e0a08a;
+}
+
+.published-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.published-head button,
+.published-actions button {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.published-head button:hover,
+.published-actions button:hover {
+  border-color: #3d4756;
+}
+
+.published-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.published-actions button.danger {
+  border-color: #7a3b3b;
+  background: #3a1f1f;
+  color: #f0c0c0;
+}
+
+.published {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.published-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 6rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #1f242b;
+  font-size: 0.8125rem;
+}
+
+.published-id {
+  color: var(--accent);
+  text-decoration: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+}
+
+.published-id:hover {
+  text-decoration: underline;
+}
+
+.published-size {
+  color: var(--muted);
+  text-align: right;
+}
+
+.published-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
 }
 </style>

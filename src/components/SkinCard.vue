@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import SkinCanvas from './SkinCanvas.vue'
-import { displayName, skinUrl, type SkinEntry } from '../lib/skins'
+import { skinUrl, type SkinEntry } from '../lib/skins'
 
 const props = defineProps<{ entry: SkinEntry }>()
 
 const url = computed(() => skinUrl(props.entry))
-const name = computed(() => displayName(props.entry))
 
 /** 3D 实例就绪后隐藏静态占位，归还后再显示回来 */
 const ready = ref(false)
@@ -22,10 +21,9 @@ const ready = ref(false)
         aria-hidden="true"
       />
       <SkinCanvas :skin="url" @ready="ready = true" @released="ready = false" />
-      <span class="badge">#{{ props.entry.id }}</span>
     </div>
     <div class="meta">
-      <span class="name">{{ name }}</span>
+      <span class="name mono">{{ props.entry.id }}</span>
     </div>
   </a>
 </template>
@@ -75,25 +73,15 @@ const ready = ref(false)
   image-rendering: pixelated;
 }
 
-.badge {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(12, 14, 18, 0.72);
-  color: #97a1b0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.6875rem;
-}
-
 .meta {
   padding: 0.5rem 0.65rem 0.6rem;
 }
 
 .name {
   display: block;
-  font-size: 0.8125rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

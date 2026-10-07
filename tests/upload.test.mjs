@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { encodePng } from '../scripts/lib/png.mjs'
 import { handleUpload } from '../functions/api/upload.ts'
+import { handleDeleteSkin } from '../functions/api/skin.ts'
 import { createFakeGitHub } from './helpers/fake-github.mjs'
 
 const PASSWORD = 'correct-horse-battery-staple-0123456789abcdef'
@@ -311,4 +312,162 @@ test('GitHub 鉴权失败时返回 502 且不泄漏 token', async () => {
 
   assert.equal(response.status, 502)
   assert.equal((await response.text()).includes(ENV.GITHUB_TOKEN), false)
+})
+
+// ---------------------------------------------------------------- 删除皮肤
+
+function deleteRequest(id, { password = PASSWORD, method = 'DELETE' } = {}) {
+  return new Request(`https://skins.3shy.cn/api/skin?id=${encodeURIComponent(id)}`, {
+    method,
+    headers: { authorization: `Bearer ${password}` },
+  })
+}
+
+/** 先传一张，返回它的 id，用于再删掉。 */
+async function uploadOne(fetchImpl, name = '待删皮肤') {
+  const response = await handleUpload(request({ items: [itemFrom(skinPng(), name)] }), ENV, {
+    fetch: fetchImpl,
+  })
+  const body = await response.json()
+  return body.results[0].id
+}
+
+test('删除会一次提交同时移除 PNG 与 meta 条目', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const id = await uploadOne(fetchImpl)
+  assert.ok(state.files.has(`public/s/${id}.png`), '前置条件：文件已入库')
+
+  const response = await handleDeleteSkin(deleteRequest(id), ENV, { fetch: fetchImpl })
+  assert.equal(response.status, 200)
+
+  const body = await response.json()
+  assert.equal(body.deleted, true)
+  assert.equal(body.id, id)
+  assert.ok(body.commitSha)
+
+  assert.equal(state.files.has(`public/s/${id}.png`), false, 'PNG 应已从树里摘掉')
+  assert.equal(readMeta(state).skins.length, 0, 'meta 条目应已移除')
+})
+
+test('删除不回收 ID：nextId 保持不动', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const id = await uploadOne(fetchImpl)
+  const nextIdBefore = readMeta(state).nextId
+
+  await handleDeleteSkin(deleteRequest(id), ENV, { fetch: fetchImpl })
+
+  // 回收 ID 会让新皮肤拿到一个曾经发出去的 URL，旧客户端会看到别人的皮肤
+  assert.equal(readMeta(state).nextId, nextIdBefore)
+})
+
+test('删掉一张后，下一张仍拿新 ID 而不是复用被删的那个', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const first = await uploadOne(fetchImpl, '第一张')
+  await handleDeleteSkin(deleteRequest(first), ENV, { fetch: fetchImpl })
+
+  const second = await uploadOne(fetchImpl, '第二张')
+  assert.notEqual(second, first, '不应复用已删除的 ID')
+  assert.equal(readMeta(state).skins.length, 1)
+})
+
+test('只删掉目标那一张，其余保持不动', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const items = [
+    itemFrom(skinPng(64, 64, 10), 'A'),
+    itemFrom(skinPng(64, 64, 90), 'B'),
+    itemFrom(skinPng(64, 64, 170), 'C'),
+  ]
+  const uploaded = await (
+    await handleUpload(request({ items }), ENV, { fetch: fetchImpl })
+  ).json()
+  const target = uploaded.results[1].id
+
+  await handleDeleteSkin(deleteRequest(target), ENV, { fetch: fetchImpl })
+
+  const remaining = readMeta(state).skins.map((s) => s.id)
+  assert.deepEqual(remaining, [uploaded.results[0].id, uploaded.results[2].id])
+  assert.equal(state.files.has(`public/s/${target}.png`), false)
+  assert.ok(state.files.has(`public/s/${uploaded.results[0].id}.png`))
+  assert.ok(state.files.has(`public/s/${uploaded.results[2].id}.png`))
+})
+
+test('文件不在树里但 meta 有条目时也能删（清理不一致状态）', async () => {
+  const files = seedMeta(
+    meta1001(), // 见下方辅助：只登记 meta，不建文件
+  )
+  const { fetchImpl, state } = createFakeGitHub({ files })
+
+  const response = await handleDeleteSkin(deleteRequest('00000001'), ENV, { fetch: fetchImpl })
+  assert.equal(response.status, 200)
+  assert.equal(readMeta(state).skins.length, 0)
+})
+
+/** 一个有 meta 条目、但没有对应文件的仓库状态。 */
+function meta1001() {
+  return {
+    version: 1,
+    nextId: 2,
+    skins: [
+      { id: '00000001', sha256: 'x'.repeat(64), name: '幽灵条目', size: 1, uploadedAt: null },
+    ],
+  }
+}
+
+test('删除不存在的 ID 返回 404 且不提交', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const response = await handleDeleteSkin(deleteRequest('000000ff'), ENV, { fetch: fetchImpl })
+
+  assert.equal(response.status, 404)
+  assert.equal(state.commits.length, 0)
+})
+
+test('ID 格式非法返回 400，不碰 GitHub', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  for (const bad of ['', 'abc', 'ZZZZZZZZ', '0000000g', '../../etc/passwd']) {
+    const response = await handleDeleteSkin(deleteRequest(bad), ENV, { fetch: fetchImpl })
+    assert.equal(response.status, 400, `id=${JSON.stringify(bad)} 应当被拒`)
+  }
+  assert.equal(state.commits.length, 0)
+})
+
+test('删除需要密码：密码错返回 401，未配置密码也拒绝', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const id = await uploadOne(fetchImpl)
+  const commitsBefore = state.commits.length
+
+  const wrong = await handleDeleteSkin(
+    deleteRequest(id, { password: 'wrong-password-of-same-length-000000' }),
+    ENV,
+    { fetch: fetchImpl },
+  )
+  assert.equal(wrong.status, 401)
+
+  const noPassword = await handleDeleteSkin(deleteRequest(id), { ...ENV, ADMIN_PASSWORD: undefined }, {
+    fetch: fetchImpl,
+  })
+  assert.equal(noPassword.status, 401)
+
+  assert.equal(state.commits.length, commitsBefore, '鉴权失败不应产生提交')
+  assert.ok(state.files.has(`public/s/${id}.png`), '鉴权失败不应删除任何东西')
+})
+
+test('非 DELETE 方法返回 405', async () => {
+  const { fetchImpl } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const response = await handleDeleteSkin(deleteRequest('00000001', { method: 'GET' }), ENV, {
+    fetch: fetchImpl,
+  })
+  assert.equal(response.status, 405)
+})
+
+test('删除遇到分支并发推进时会重试并成功', async () => {
+  const { fetchImpl, state } = createFakeGitHub({ files: seedMeta(EMPTY_META) })
+  const id = await uploadOne(fetchImpl)
+  state.conflictsToSimulate = 1
+
+  const response = await handleDeleteSkin(deleteRequest(id), ENV, { fetch: fetchImpl })
+
+  assert.equal(response.status, 200)
+  assert.equal(state.files.has(`public/s/${id}.png`), false)
+  assert.equal(readMeta(state).skins.length, 0)
+  assert.equal(state.refUpdates, 2, '上传一次 + 删除重试一次')
 })

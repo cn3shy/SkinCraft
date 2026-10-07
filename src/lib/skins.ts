@@ -2,7 +2,6 @@
 export interface SkinEntry {
   id: string
   path: string
-  name: string
   size: number
   uploadedAt: string | null
 }
@@ -32,9 +31,15 @@ export function skinUrl(entry: SkinEntry): string {
   return new URL(entry.path, location.origin).href
 }
 
-/** 没有起名字的皮肤退回显示 ID，保证列表里每一项都可辨识。 */
+/**
+ * 站点对外只认 ID。
+ *
+ * 展示名一律是 ID：既然后台的上传命名就是 ID，历史数据里那些从文件名来的名字
+ * 也一并按 ID 显示，避免同一批皮肤出现两套叫法。`skins.meta.json` 里的 `name`
+ * 字段仍然保留，只是不再参与展示。
+ */
 export function displayName(entry: SkinEntry): string {
-  return entry.name || `#${entry.id}`
+  return entry.id
 }
 
 export function formatSize(bytes: number): string {

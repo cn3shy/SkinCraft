@@ -34,13 +34,28 @@ test('为每个 PNG 生成索引条目，展示字段取自 meta', () => {
   })
 
   assert.equal(index.count, 1)
+  // 索引里没有 name：展示名一律是 ID，meta 的 name 字段不输出到站点
   assert.deepEqual(index.skins[0], {
     id: '00000001',
     path: '/s/00000001.png',
-    name: 'Wreeper',
     size: buffer.length,
     uploadedAt: '2026-01-02T00:00:00Z',
   })
+})
+
+test('索引里不出现 meta 的 name 字段', () => {
+  const buffer = skin()
+  const { index } = buildIndex({
+    entries: [{ id: '00000001', buffer }],
+    meta: meta(
+      [{ id: '00000001', sha256: sha256(buffer), name: '不该出现', uploadedAt: null }],
+      2,
+    ),
+    generatedAt: GENERATED_AT,
+  })
+
+  assert.equal('name' in index.skins[0], false)
+  assert.equal(JSON.stringify(index).includes('不该出现'), false)
 })
 
 test('索引里不出现 sha256', () => {
@@ -67,16 +82,15 @@ test('体积以实际文件为准，忽略 meta 里写错的声明', () => {
   assert.equal(warnings.some((w) => w.includes('sha256')), true)
 })
 
-test('meta 里缺失条目时自动收录，name 留空并告警', () => {
+test('meta 里缺失条目时自动收录，uploadedAt 留空并告警', () => {
   const buffer = skin()
   const { index, warnings } = buildIndex({
     entries: [{ id: '00000007', buffer }],
-    meta: meta([], 1),
+    meta: meta([], 8),
     generatedAt: GENERATED_AT,
   })
 
   assert.equal(index.count, 1)
-  assert.equal(index.skins[0].name, '')
   assert.equal(index.skins[0].uploadedAt, null)
   assert.equal(warnings.some((w) => w.includes('00000007')), true)
 })
@@ -140,15 +154,41 @@ test('尺寸不是 64×64 或 64×32 时告警，但仍收录', () => {
   assert.equal(warnings.some((w) => w.includes('128')), true)
 })
 
-test('文件 ID 大于等于 nextId 时告警，提示会撞号', () => {
+test('文件 ID 大于等于 nextId 时列为 blocker，构建必须失败', () => {
   const buffer = skin()
-  const { warnings } = buildIndex({
+  const { warnings, blockers } = buildIndex({
     entries: [{ id: '00000005', buffer }],
     meta: meta([], 3),
     generatedAt: GENERATED_AT,
   })
 
-  assert.equal(warnings.some((w) => w.includes('nextId')), true)
+  // 撞号会让后台上传覆盖既有 PNG，所以不能再降级成「告警后继续构建」
+  assert.equal(blockers.length, 1)
+  assert.equal(blockers[0].includes('nextId'), true)
+  // 报错文案要直接给出该改成多少，八位十六进制
+  assert.equal(blockers[0].includes('00000006'), true)
+  assert.equal(warnings.some((w) => w.includes('nextId')), false)
+})
+
+test('ID 恰好等于 nextId 时也算撞号', () => {
+  const { blockers } = buildIndex({
+    entries: [{ id: '00000003', buffer: skin() }],
+    meta: meta([], 3),
+    generatedAt: GENERATED_AT,
+  })
+
+  assert.equal(blockers.length, 1)
+})
+
+test('ID 小于 nextId 时不产生 blocker', () => {
+  const buffer = skin()
+  const { blockers } = buildIndex({
+    entries: [{ id: '00000001', buffer }],
+    meta: meta([{ id: '00000001', sha256: sha256(buffer), name: 'ok', uploadedAt: null }], 8),
+    generatedAt: GENERATED_AT,
+  })
+
+  assert.deepEqual(blockers, [])
 })
 
 test('索引带上 version 与 generatedAt', () => {

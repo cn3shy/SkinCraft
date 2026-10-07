@@ -131,10 +131,15 @@ export function createFakeGitHub({ files = new Map() } = {}) {
         return json({ message: 'Update is not a fast forward' }, 422)
       }
 
-      // 分支真正前进，这次提交的 tree 才落到工作树上
+      // 分支真正前进，这次提交的 tree 才落到工作树上。
+      // sha === null 表示删除该路径——真实 Git Data API 就是这个语义。
       const entries = state.trees.get(state.pendingCommits.get(body.sha)) ?? []
       for (const entry of entries) {
-        const content = entry.sha === null ? null : contentBySha(entry.sha)
+        if (entry.sha === null) {
+          state.files.delete(entry.path)
+          continue
+        }
+        const content = contentBySha(entry.sha)
         if (content) state.files.set(entry.path, content)
       }
 

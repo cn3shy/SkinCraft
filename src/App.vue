@@ -11,12 +11,10 @@ const detailId = computed(() => (route.value.name === 'detail' ? route.value.id 
 </script>
 
 <template>
+  <!-- 后台入口有意不放在导航里：管理页属于站长自用，知道地址的人手打 #/admin 即可，
+       不对外暴露入口也少一层被扫描的面。 -->
   <header class="topbar">
     <a class="brand" href="#/">SkinCraft</a>
-    <nav class="nav">
-      <a href="#/">皮肤库</a>
-      <a href="#/admin">后台</a>
-    </nav>
   </header>
 
   <main class="page">
@@ -42,21 +40,6 @@ const detailId = computed(() => (route.value.name === 'detail' ? route.value.id 
   font-weight: 600;
   text-decoration: none;
   letter-spacing: 0.02em;
-}
-
-.nav {
-  display: flex;
-  gap: 1rem;
-  font-size: 0.875rem;
-}
-
-.nav a {
-  color: var(--muted);
-  text-decoration: none;
-}
-
-.nav a:hover {
-  color: var(--text);
 }
 
 .page {

@@ -4,12 +4,39 @@
  * 流程：校验密码 → 逐张校验 PNG → 读 GitHub 现状 → 分配 ID 并去重
  *      → 用 Git Data API 把「所有 PNG + 更新后的 skins.meta.json」合并成一次提交
  *
- * 必须是自包含单文件：EdgeOne 的打包器对外部导入的支持未经证实，
- * 因此这里不 import 仓库里其它模块，PNG 头解析在 scripts/lib/png.mjs 有一份刻意重复。
- *
  * 只使用 Web 标准 API（Request/Response/fetch/crypto.subtle/atob/btoa），
- * 这样同一份 handler 能被本地 Node 适配器与 Node Functions 退路零改动复用。
+ * 这样同一份 handler 能被本地 Node 适配器零改动复用。
+ *
+ * GitHub 那一层在 lib/github.ts，与 /api/skin 的删除端点共用。
  */
+
+import {
+  MAX_ID,
+  META_PATH,
+  base64FromBytes,
+  bytesFromBase64,
+  createBlob,
+  createCommit,
+  createTree,
+  fail,
+  githubConfigured,
+  idOf,
+  json,
+  mapWithConcurrency,
+  patchRef,
+  readBase,
+  requireAdmin,
+  sha256Hex,
+  skinPath,
+  urlFor,
+  type Base,
+  type Env,
+  type Meta,
+  type MetaEntry,
+  type TreeEntry,
+} from './lib/github.ts'
+
+export type { Env }
 
 // ---------------------------------------------------------------- 常量
 
@@ -18,21 +45,9 @@ const VALID_DIMENSIONS = new Set(['64x64', '64x32'])
 const MAX_SKIN_BYTES = 64 * 1024
 const MAX_BODY_BYTES = 1024 * 1024
 const DEFAULT_MAX_BATCH = 30
-const MAX_ID = 0xffffffff
-const META_PATH = 'skins.meta.json'
-const SKIN_DIR = 'public/s'
 const MAX_ATTEMPTS = 3
 
 // ---------------------------------------------------------------- 类型
-
-export interface Env {
-  ADMIN_PASSWORD?: string
-  GITHUB_TOKEN?: string
-  GITHUB_REPO?: string
-  GITHUB_BRANCH?: string
-  SITE_ORIGIN?: string
-  MAX_BATCH?: string
-}
 
 export interface Deps {
   fetch?: typeof fetch
@@ -44,110 +59,6 @@ interface PreparedItem {
   /** 显式标注成非共享的 ArrayBuffer，才满足 crypto.subtle 的 BufferSource 约束 */
   bytes: Uint8Array<ArrayBuffer>
   sha256: string
-}
-
-interface MetaEntry {
-  id: string
-  sha256: string
-  name: string
-  size: number
-  uploadedAt: string
-}
-
-interface Meta {
-  version: number
-  nextId: number
-  skins: MetaEntry[]
-}
-
-interface Base {
-  commitSha: string
-  treeSha: string
-  /** 仓库现有路径 -> blob sha */
-  paths: Map<string, string>
-  meta: Meta
-}
-
-// ---------------------------------------------------------------- 工具
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  })
-}
-
-function fail(status: number, message: string, extra: Record<string, unknown> = {}): Response {
-  return json({ error: message, ...extra }, status)
-}
-
-function bytesFromBase64(base64: string): Uint8Array<ArrayBuffer> {
-  const binary = atob(base64.replace(/\s/g, ''))
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
-}
-
-function base64FromBytes(bytes: Uint8Array): string {
-  let binary = ''
-  const CHUNK = 0x8000
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
-  }
-  return btoa(binary)
-}
-
-async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-/** 常量时间比较：长度与内容都走完全程，不做短路，避免用响应时间猜密码。 */
-function constantTimeEqual(a: string, b: string): boolean {
-  const left = new TextEncoder().encode(a)
-  const right = new TextEncoder().encode(b)
-  let diff = left.length ^ right.length
-  const length = Math.max(left.length, right.length)
-  for (let i = 0; i < length; i++) {
-    diff |= (left[i] ?? 0) ^ (right[i] ?? 0)
-  }
-  return diff === 0
-}
-
-function bearerToken(request: Request): string | null {
-  const header = request.headers.get('authorization') ?? ''
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim())
-  return match ? match[1] : null
-}
-
-function idOf(numeric: number): string {
-  return numeric.toString(16).padStart(8, '0')
-}
-
-function skinPath(id: string): string {
-  return `${SKIN_DIR}/${id}.png`
-}
-
-function urlFor(id: string, env: Env): string {
-  return `${env.SITE_ORIGIN ?? ''}/s/${id}.png`
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  run: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let cursor = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor
-      cursor += 1
-      results[index] = await run(items[index], index)
-    }
-  })
-  await Promise.all(workers)
-  return results
 }
 
 // ---------------------------------------------------------------- PNG 校验
@@ -229,71 +140,7 @@ async function prepareItem(raw: unknown): Promise<PreparedItem> {
   return { name, bytes, sha256 }
 }
 
-// ---------------------------------------------------------------- GitHub
-
-function githubError(status: number, message: string): Error & { status: number } {
-  return Object.assign(new Error(message), { status })
-}
-
-async function gh(
-  env: Env,
-  fetchImpl: typeof fetch,
-  path: string,
-  init: RequestInit = {},
-): Promise<Response> {
-  return fetchImpl(`https://api.github.com/repos/${env.GITHUB_REPO}${path}`, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${env.GITHUB_TOKEN ?? ''}`,
-      accept: 'application/vnd.github+json',
-      'x-github-api-version': '2022-11-28',
-      'user-agent': 'SkinCraft',
-      ...(init.body ? { 'content-type': 'application/json' } : {}),
-      ...(init.headers as Record<string, string> | undefined),
-    },
-  })
-}
-
-async function ghJson<T>(env: Env, fetchImpl: typeof fetch, path: string, init?: RequestInit): Promise<T> {
-  const response = await gh(env, fetchImpl, path, init)
-  if (!response.ok) {
-    throw githubError(response.status, `GitHub API ${path} 返回 ${response.status}`)
-  }
-  return (await response.json()) as T
-}
-
-async function readBase(env: Env, fetchImpl: typeof fetch): Promise<Base> {
-  const ref = await ghJson<{ object: { sha: string } }>(
-    env,
-    fetchImpl,
-    `/git/ref/heads/${env.GITHUB_BRANCH}`,
-  )
-  const commitSha = ref.object.sha
-
-  const commit = await ghJson<{ tree: { sha: string } }>(
-    env,
-    fetchImpl,
-    `/git/commits/${commitSha}`,
-  )
-  const treeSha = commit.tree.sha
-
-  const tree = await ghJson<{ tree: { path: string; sha: string }[] }>(
-    env,
-    fetchImpl,
-    `/git/trees/${treeSha}?recursive=1`,
-  )
-  const paths = new Map(tree.tree.map((entry) => [entry.path, entry.sha]))
-
-  let meta: Meta = { version: 1, nextId: 1, skins: [] }
-  const metaSha = paths.get(META_PATH)
-  if (metaSha) {
-    const blob = await ghJson<{ content: string }>(env, fetchImpl, `/git/blobs/${metaSha}`)
-    const parsed = JSON.parse(new TextDecoder().decode(bytesFromBase64(blob.content))) as Meta
-    meta = { version: parsed.version ?? 1, nextId: parsed.nextId ?? 1, skins: parsed.skins ?? [] }
-  }
-
-  return { commitSha, treeSha, paths, meta }
-}
+// ---------------------------------------------------------------- 提交
 
 /** 把一批 PNG 与更新后的 meta 合并成一次提交。返回 null 表示分支被并发推进，需要整体重试。 */
 async function writeBatch(
@@ -304,58 +151,26 @@ async function writeBatch(
   nextMeta: Meta,
   message: string,
 ): Promise<string | null> {
-  const blobShas = await mapWithConcurrency(assignments, 6, async (assignment) => {
-    const created = await ghJson<{ sha: string }>(env, fetchImpl, '/git/blobs', {
-      method: 'POST',
-      body: JSON.stringify({
-        content: base64FromBytes(assignment.item.bytes),
-        encoding: 'base64',
-      }),
-    })
-    return created.sha
-  })
+  const blobShas = await mapWithConcurrency(assignments, 6, (assignment) =>
+    createBlob(env, fetchImpl, base64FromBytes(assignment.item.bytes)),
+  )
 
   const metaBytes = new TextEncoder().encode(`${JSON.stringify(nextMeta, null, 2)}\n`)
-  const metaBlob = await ghJson<{ sha: string }>(env, fetchImpl, '/git/blobs', {
-    method: 'POST',
-    body: JSON.stringify({ content: base64FromBytes(metaBytes), encoding: 'base64' }),
-  })
+  const metaBlobSha = await createBlob(env, fetchImpl, base64FromBytes(metaBytes))
 
-  const treeEntries = [
+  const entries: TreeEntry[] = [
     ...assignments.map((assignment, index) => ({
       path: skinPath(assignment.id),
-      mode: '100644',
-      type: 'blob',
+      mode: '100644' as const,
+      type: 'blob' as const,
       sha: blobShas[index],
     })),
-    { path: META_PATH, mode: '100644', type: 'blob', sha: metaBlob.sha },
+    { path: META_PATH, mode: '100644', type: 'blob', sha: metaBlobSha },
   ]
 
-  const newTree = await ghJson<{ sha: string }>(env, fetchImpl, '/git/trees', {
-    method: 'POST',
-    body: JSON.stringify({ base_tree: base.treeSha, tree: treeEntries }),
-  })
-
-  const newCommit = await ghJson<{ sha: string }>(env, fetchImpl, '/git/commits', {
-    method: 'POST',
-    body: JSON.stringify({
-      message,
-      tree: newTree.sha,
-      parents: [base.commitSha],
-    }),
-  })
-
-  const patch = await gh(env, fetchImpl, `/git/refs/heads/${env.GITHUB_BRANCH}`, {
-    method: 'PATCH',
-    // force 必须为 false：并发推进时宁可失败重试，也不能覆盖别人的提交
-    body: JSON.stringify({ sha: newCommit.sha, force: false }),
-  })
-
-  if (patch.status === 422) return null
-  if (!patch.ok) {
-    throw githubError(patch.status, `推进分支失败：HTTP ${patch.status}`)
-  }
-  return newCommit.sha
+  const treeSha = await createTree(env, fetchImpl, base.treeSha, entries)
+  const commitSha = await createCommit(env, fetchImpl, treeSha, base.commitSha, message)
+  return patchRef(env, fetchImpl, commitSha)
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -373,14 +188,8 @@ export async function handleUpload(
   }
 
   // 未配置密码时必须拒绝，绝不能退化成「无鉴权可上传」
-  const expected = env.ADMIN_PASSWORD
-  if (!expected) {
-    return fail(401, '服务端未配置管理密码')
-  }
-  const provided = bearerToken(request)
-  if (!provided || !constantTimeEqual(provided, expected)) {
-    return fail(401, '密码不正确')
-  }
+  const unauthorized = requireAdmin(request, env)
+  if (unauthorized) return unauthorized
 
   const declaredLength = Number(request.headers.get('content-length') ?? '0')
   if (declaredLength > MAX_BODY_BYTES) {
@@ -419,7 +228,7 @@ export async function handleUpload(
     return fail(400, '有皮肤未通过校验，本批未做任何改动', { results: validation })
   }
 
-  if (!env.GITHUB_REPO || !env.GITHUB_BRANCH || !env.GITHUB_TOKEN) {
+  if (!githubConfigured(env)) {
     return fail(500, '服务端缺少 GitHub 配置')
   }
 

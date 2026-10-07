@@ -23,7 +23,15 @@ function readMeta() {
   if (!existsSync(META_PATH)) {
     return { version: 1, nextId: 1, skins: [] }
   }
-  return JSON.parse(readFileSync(META_PATH, 'utf8'))
+  const raw = readFileSync(META_PATH, 'utf8')
+  try {
+    return JSON.parse(raw)
+  } catch (error) {
+    // 元数据坏掉时不能当成空 meta 继续：那会让 nextId 退回 1，
+    // 之后的上传就会从 00000001 开始覆盖既有皮肤。
+    console.error(`✗ 解析 ${META_PATH} 失败，已中止构建：${error.message}`)
+    process.exit(1)
+  }
 }
 
 function readEntries() {
@@ -49,11 +57,20 @@ function readEntries() {
 }
 
 const { entries, warnings: scanWarnings } = readEntries()
-const { index, warnings } = buildIndex({
+const { index, warnings, blockers } = buildIndex({
   entries,
   meta: readMeta(),
   generatedAt: new Date().toISOString(),
 })
+
+// 撞号属于必须人肉修掉的问题，写完索引再失败会留下一个有问题的产物
+if (blockers.length > 0) {
+  console.error('✗ 索引未生成：以下问题会让后台上传覆盖既有皮肤，请先修复')
+  for (const blocker of blockers) {
+    console.error(`  ✗ ${blocker}`)
+  }
+  process.exit(1)
+}
 
 writeFileSync(OUT_PATH, `${JSON.stringify(index, null, 2)}\n`)
 
